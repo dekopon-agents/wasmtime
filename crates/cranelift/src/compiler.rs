@@ -1711,6 +1711,7 @@ impl FunctionCompiler<'_> {
                 len.try_into().unwrap(),
                 tunables.generate_address_map,
             );
+            compiled_function.buffer.clear_srclocs();
         }
 
         if isa.flags().unwind_info() {

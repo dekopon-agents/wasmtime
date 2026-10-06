@@ -397,21 +397,21 @@ impl MachBufferFinalized<Stencil> {
 )]
 pub struct MachBufferFinalized<T: CompilePhase> {
     /// The buffer contents, as raw bytes.
-    pub(crate) data: SmallVec<[u8; 1024]>,
+    pub(crate) data: Vec<u8>,
     /// Any relocations referring to this code. Note that only *external*
     /// relocations are tracked here; references to labels within the buffer are
     /// resolved before emission.
-    pub(crate) relocs: SmallVec<[FinalizedMachReloc; 16]>,
+    pub(crate) relocs: Vec<FinalizedMachReloc>,
     /// Any trap records referring to this code.
-    pub(crate) traps: SmallVec<[MachTrap; 16]>,
+    pub(crate) traps: Vec<MachTrap>,
     /// Any call site records referring to this code.
-    pub(crate) call_sites: SmallVec<[MachCallSite; 16]>,
+    pub(crate) call_sites: Vec<MachCallSite>,
     /// Any patchable call site locations referring to this code.
-    pub(crate) patchable_call_sites: SmallVec<[MachPatchableCallSite; 16]>,
+    pub(crate) patchable_call_sites: Vec<MachPatchableCallSite>,
     /// Any exception-handler records referred to at call sites.
-    pub(crate) exception_handlers: SmallVec<[FinalizedMachExceptionHandler; 16]>,
+    pub(crate) exception_handlers: Vec<FinalizedMachExceptionHandler>,
     /// Any source location mappings referring to this code.
-    pub(crate) srclocs: SmallVec<[T::MachSrcLocType; 64]>,
+    pub(crate) srclocs: Vec<T::MachSrcLocType>,
     /// Any debug tags referring to this code.
     pub(crate) debug_tags: Vec<MachDebugTags>,
     /// Pool of debug tags referenced by `MachDebugTags` entries.
@@ -420,13 +420,13 @@ pub struct MachBufferFinalized<T: CompilePhase> {
     ///
     /// Each entry is an `(offset, span, stack_map)` triple. Entries are sorted
     /// by code offset, and each stack map covers `span` bytes on the stack.
-    pub(crate) user_stack_maps: SmallVec<[(CodeOffset, u32, ir::UserStackMap); 8]>,
+    pub(crate) user_stack_maps: Vec<(CodeOffset, u32, ir::UserStackMap)>,
     /// Stack frame layout metadata. If provided for a MachBuffer
     /// containing a function body, this allows interpretation of
     /// runtime state given a view of an active stack frame.
     pub(crate) frame_layout: Option<MachBufferFrameLayout>,
     /// Any unwind info at a given location.
-    pub unwind_info: SmallVec<[(CodeOffset, UnwindInst); 8]>,
+    pub unwind_info: Vec<(CodeOffset, UnwindInst)>,
     /// The required alignment of this buffer.
     pub alignment: u32,
     /// The means by which to NOP out patchable call sites.
@@ -1664,17 +1664,17 @@ impl<I: VCodeInst> MachBuffer<I> {
         srclocs.sort_by_key(|entry| entry.start);
 
         MachBufferFinalized {
-            data: self.data,
+            data: self.data.into_vec(),
             relocs: finalized_relocs,
-            traps: self.traps,
-            call_sites: self.call_sites,
-            patchable_call_sites: self.patchable_call_sites,
+            traps: self.traps.into_vec(),
+            call_sites: self.call_sites.into_vec(),
+            patchable_call_sites: self.patchable_call_sites.into_vec(),
             exception_handlers: finalized_exception_handlers,
-            srclocs,
+            srclocs: srclocs.into_vec(),
             debug_tags: self.debug_tags,
             debug_tag_pool: self.debug_tag_pool,
-            user_stack_maps: self.user_stack_maps,
-            unwind_info: self.unwind_info,
+            user_stack_maps: self.user_stack_maps.into_vec(),
+            unwind_info: self.unwind_info.into_vec(),
             alignment,
             frame_layout: self.frame_layout,
             nop_units: I::gen_nop_units(),
@@ -1904,6 +1904,12 @@ impl<T: CompilePhase> MachBufferFinalized<T> {
         &self.srclocs[..]
     }
 
+    /// Release source locations after a consumer has preserved its own address map.
+    pub fn clear_srclocs(&mut self) {
+        self.srclocs.clear();
+        self.srclocs.shrink_to_fit();
+    }
+
     /// Get all debug tags, sorted by associated offset.
     pub fn debug_tags(&self) -> impl Iterator<Item = MachBufferDebugTagList<'_>> {
         self.debug_tags.iter().map(|tags| {
@@ -1972,7 +1978,7 @@ impl<T: CompilePhase> MachBufferFinalized<T> {
 
     /// Take this buffer's user stack map metadata.
     pub fn take_user_stack_maps(&mut self) -> SmallVec<[(CodeOffset, u32, ir::UserStackMap); 8]> {
-        mem::take(&mut self.user_stack_maps)
+        SmallVec::from_vec(mem::take(&mut self.user_stack_maps))
     }
 
     /// Get the list of call sites for this code, along with
