@@ -2504,6 +2504,10 @@ impl<I: VCodeInst> MachTextSectionBuilder<I> {
 }
 
 impl<I: VCodeInst> TextSectionBuilder for MachTextSectionBuilder<I> {
+    fn reserve(&mut self, additional: usize) {
+        self.buf.data.reserve_exact(additional);
+    }
+
     fn append(
         &mut self,
         labeled: bool,
@@ -3168,5 +3172,33 @@ mod test {
 
         let buf = buf.finish(&constants, state.ctrl_plane_mut());
         let _ = buf.total_size();
+    }
+
+    #[test]
+    fn reserved_text_holds_aligned_functions_and_page_padding_without_regrowth() {
+        let mut ctrl_plane = ControlPlane::default();
+        let funcs: [(usize, u32); 3] = [(3000, 16), (5001, 64), (77, 4)];
+        let page = 0x10000;
+        let estimate = funcs
+            .iter()
+            .map(|(len, align)| len + *align as usize - 1)
+            .sum::<usize>()
+            + page
+            - 1;
+
+        let mut reserved = MachTextSectionBuilder::<Inst>::new(funcs.len());
+        reserved.reserve(estimate);
+        let mut plain = MachTextSectionBuilder::<Inst>::new(funcs.len());
+        for (len, align) in funcs {
+            let body = vec![0xa5; len];
+            let at = reserved.append(true, &body, align, &mut ctrl_plane);
+            assert_eq!(at, plain.append(true, &body, align, &mut ctrl_plane));
+        }
+        let mut text = reserved.finish(&mut ctrl_plane);
+        assert_eq!(text, plain.finish(&mut ctrl_plane));
+        assert_eq!(text.capacity(), estimate);
+
+        text.resize(text.len().next_multiple_of(page), 0);
+        assert_eq!(text.capacity(), estimate);
     }
 }

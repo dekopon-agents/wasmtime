@@ -45,6 +45,7 @@ mod module;
 mod module_serialize;
 mod name;
 mod native_debug;
+mod native_unwind;
 mod noextern;
 mod piped_tests;
 mod pooling_allocator;

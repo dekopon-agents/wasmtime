@@ -177,7 +177,7 @@ impl TrapEncodingBuilder {
             SectionKind::ReadOnlyData,
         );
 
-        obj.append_section_data(section, &self.finish(), 1);
+        obj.set_section_data(section, self.finish(), 1);
     }
 
     /// Finishes encoding and returns the raw section contents, as decoded by
@@ -186,11 +186,15 @@ impl TrapEncodingBuilder {
         self.seal_block();
         let entries = u32::try_from(self.entries).unwrap();
         let num_blocks = u32::try_from(self.block_index.len()).unwrap();
-        let mut ret = Vec::with_capacity(8 + self.block_index.len() * 8 + self.block_bodies.len());
-        ret.extend_from_slice(&entries.to_le_bytes());
-        ret.extend_from_slice(&num_blocks.to_le_bytes());
-        ret.extend_from_slice(object::bytes_of_slice(&self.block_index));
-        ret.extend_from_slice(&self.block_bodies);
+        let prefix_len = 8 + self.block_index.len() * 8;
+        let body_len = self.block_bodies.len();
+        let mut ret = self.block_bodies;
+        ret.reserve_exact(prefix_len);
+        ret.resize(prefix_len + body_len, 0);
+        ret.copy_within(..body_len, prefix_len);
+        ret[..4].copy_from_slice(&entries.to_le_bytes());
+        ret[4..8].copy_from_slice(&num_blocks.to_le_bytes());
+        ret[8..prefix_len].copy_from_slice(object::bytes_of_slice(&self.block_index));
         ret
     }
 }

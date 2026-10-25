@@ -27,6 +27,9 @@ use wasmtime_environ::{Compiler as _, FuncKey, TripleExt, obj};
 
 const TEXT_SECTION_NAME: &[u8] = b".text";
 
+/// Bounds how many gimli FDEs exist at once while encoding `.eh_frame`.
+const FDES_PER_CIE: usize = 1024;
+
 fn text_align(compiler: &Compiler) -> u64 {
     // text pages will not be made executable with pulley, so the section
     // doesn't need to be padded out to page alignment boundaries.
@@ -519,32 +522,31 @@ impl<'a> UnwindInfoBuilder<'a> {
             Some(cie) => cie,
             None => return,
         };
-        let mut table = FrameTable::default();
         cie.fde_address_encoding = gimli::constants::DW_EH_PE_pcrel;
-        let cie_id = table.add_cie(cie);
-
-        for (text_section_off, unwind_info) in self.systemv_unwind_info.iter() {
-            let backwards_off = text_section_size - text_section_off;
-            let actual_offset = -i64::try_from(backwards_off).unwrap();
-            // Note that gimli wants an unsigned 64-bit integer here, but
-            // unwinders just use this constant for a relative addition with the
-            // address of the FDE, which means that the sign doesn't actually
-            // matter.
-            let fde = unwind_info.to_fde(Address::Constant(actual_offset.cast_unsigned()));
-            table.add_fde(cie_id, fde);
-        }
         let endian = match compiler.triple().endianness().unwrap() {
             target_lexicon::Endianness::Little => RunTimeEndian::Little,
             target_lexicon::Endianness::Big => RunTimeEndian::Big,
         };
         let mut eh_frame = EhFrame(MyVec(EndianVec::new(endian)));
-        table.write_eh_frame(&mut eh_frame).unwrap();
+        // Each batch has an equivalent CIE. Keep one continuous writer so
+        // FDE pointers remain relative to their position in the full section.
+        for batch in self.systemv_unwind_info.chunks(FDES_PER_CIE) {
+            let mut table = FrameTable::default();
+            let cie_id = table.add_cie(cie.clone());
+            for (text_section_off, unwind_info) in batch {
+                let backwards_off = text_section_size - text_section_off;
+                let actual_offset = -i64::try_from(backwards_off).unwrap();
+                let fde = unwind_info.to_fde(Address::Constant(actual_offset.cast_unsigned()));
+                table.add_fde(cie_id, fde);
+            }
+            table.write_eh_frame(&mut eh_frame).unwrap();
+        }
 
         // Some unwinding implementations expect a terminating "empty" length so
         // a 0 is written at the end of the table for those implementations.
         let mut endian_vec = (eh_frame.0).0;
         endian_vec.write_u32(0).unwrap();
-        obj.append_section_data(section_id, endian_vec.slice(), 1);
+        obj.set_section_data(section_id, endian_vec.into_vec(), 1);
 
         use gimli::constants;
         use gimli::write::Error;
