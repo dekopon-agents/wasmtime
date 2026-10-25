@@ -811,6 +811,10 @@ impl CompiledCode {
 /// architecture-specific logic is sort of like a linker, but only for one
 /// object file at a time.
 pub trait TextSectionBuilder {
+    /// Reserves space for an estimated text size, without changing layout.
+    /// Builders may ignore the hint; veneers can still grow beyond it.
+    fn reserve(&mut self, _additional: usize) {}
+
     /// Appends `data` to the text section with the `align` specified.
     ///
     /// If `labeled` is `true` then this also binds the appended data to the

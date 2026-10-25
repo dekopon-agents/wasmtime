@@ -700,17 +700,6 @@ impl wasmtime_environ::Compiler for Compiler {
             funcs.iter().map(|(sym, _, _)| sym).collect::<Vec<_>>()
         );
 
-        let mut builder =
-            ModuleTextBuilder::new(obj, self, self.isa.text_section_builder(funcs.len()));
-        if self.linkopts.force_jump_veneers {
-            builder.force_veneers();
-        }
-        let mut addrs = AddressMapSection::default();
-        let mut traps = TrapEncodingBuilder::default();
-        let mut stack_maps = StackMapSection::default();
-        let mut exception_tables = ExceptionTableBuilder::default();
-        let mut frame_tables = FrameTableBuilder::default();
-
         let funcs = funcs
             .iter()
             .map(|(sym, key, func)| {
@@ -720,6 +709,30 @@ impl wasmtime_environ::Compiler for Compiler {
                 (sym, *key, func)
             })
             .collect::<Vec<_>>();
+
+        let mut text = self.isa.text_section_builder(funcs.len());
+        // The hint covers alignment and the final page padding so that the
+        // object's page-alignment append does not double the text capacity.
+        let estimated_size = funcs
+            .iter()
+            .try_fold(0usize, |size, (_, _, func)| {
+                size.checked_add(func.buffer.data().len())?
+                    .checked_add(usize::try_from(func.alignment).ok()?.saturating_sub(1))?
+                    .checked_add(self.linkopts.padding_between_functions)
+            })
+            .and_then(|size| size.checked_add(usize::try_from(self.page_size_align()).ok()? - 1));
+        if let Some(estimated_size) = estimated_size {
+            text.reserve(estimated_size);
+        }
+        let mut builder = ModuleTextBuilder::new(obj, self, text);
+        if self.linkopts.force_jump_veneers {
+            builder.force_veneers();
+        }
+        let mut addrs = AddressMapSection::default();
+        let mut traps = TrapEncodingBuilder::default();
+        let mut stack_maps = StackMapSection::default();
+        let mut exception_tables = ExceptionTableBuilder::default();
+        let mut frame_tables = FrameTableBuilder::default();
 
         let mut frame_descriptors = HashMap::new();
         if self.tunables.debug_guest {
@@ -1748,6 +1761,11 @@ impl FunctionCompiler<'_> {
                 }
             }
         }
+
+        // Unwind metadata and optional DWARF CFA information now own their
+        // representations; raw emission records have no linking consumer.
+        compiled_function.buffer.unwind_info.clear();
+        compiled_function.buffer.unwind_info.shrink_to_fit();
 
         self.compiler.contexts.lock().unwrap().push(self.cx);
 

@@ -58,6 +58,29 @@ fn using_libunwind() -> bool {
     cfg!(target_os = "macos") || unsafe { wasmtime_using_libunwind() }
 }
 
+/// Returns the offset of every FDE in a Wasmtime-encoded `.eh_frame` section.
+///
+/// The section holds one CIE per batch of FDEs and ends with a 32-bit zero
+/// terminator; CIEs, whose CIE id is zero, are skipped.
+fn fde_offsets(eh_frame: &[u8]) -> impl Iterator<Item = usize> + '_ {
+    let read_u32 = |offset: usize| {
+        u32::from_ne_bytes(eh_frame[offset..offset + 4].try_into().unwrap())
+    };
+    let end = eh_frame.len() - 4;
+    let mut offset = 0;
+    core::iter::from_fn(move || {
+        while offset < end {
+            let entry = offset;
+            // +4 because the length itself is not inclusive.
+            offset = entry + read_u32(entry) as usize + 4;
+            if read_u32(entry + 4) != 0 {
+                return Some(entry);
+            }
+        }
+        None
+    })
+}
+
 impl UnwindRegistration {
     pub const SECTION_NAME: &'static str = ".eh_frame";
 
@@ -83,27 +106,13 @@ impl UnwindRegistration {
         unsafe {
             if using_libunwind() {
                 // For libunwind, `__register_frame` takes a pointer to a single
-                // FDE. Note that we subtract 4 from the length of unwind info since
-                // wasmtime-encode .eh_frame sections always have a trailing 32-bit
-                // zero for the platforms above.
-                let start = unwind_info;
-                let end = start.add(unwind_len - 4);
-                let mut current = start;
-
-                // Walk all of the entries in the frame table and register them
-                while current < end {
-                    let len = current.cast::<u32>().read_unaligned() as usize;
-
-                    // Skip over the CIE
-                    if current != start {
-                        __register_frame(current);
-                        let cur = NonNull::new(current.cast_mut()).unwrap();
-                        registrations.push(SendSyncPtr::new(cur))?;
-                    }
-
-                    // Move to the next table entry (+4 because the length itself is
-                    // not inclusive)
-                    current = current.add(len + 4);
+                // FDE.
+                let eh_frame = core::slice::from_raw_parts(unwind_info, unwind_len);
+                for offset in fde_offsets(eh_frame) {
+                    let fde = unwind_info.add(offset);
+                    __register_frame(fde);
+                    let fde = NonNull::new(fde.cast_mut()).unwrap();
+                    registrations.push(SendSyncPtr::new(fde))?;
                 }
             } else {
                 // On gnu (libgcc), `__register_frame` will walk the FDEs until an
@@ -133,5 +142,35 @@ impl Drop for UnwindRegistration {
                 __deregister_frame(fde.as_ptr());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fde_offsets;
+    use crate::prelude::*;
+
+    fn entry(section: &mut Vec<u8>, id: u32, body: usize) -> usize {
+        let offset = section.len();
+        section.extend_from_slice(&u32::try_from(4 + body).unwrap().to_ne_bytes());
+        section.extend_from_slice(&id.to_ne_bytes());
+        section.resize(section.len() + body, 0xcc);
+        offset
+    }
+
+    #[test]
+    fn libunwind_registration_skips_every_repeated_cie() {
+        let mut section = Vec::new();
+        let mut fdes = Vec::new();
+        for _batch in 0..3 {
+            let cie = entry(&mut section, 0, 12);
+            for body in [8, 16] {
+                let pointer = u32::try_from(section.len() + 4 - cie).unwrap();
+                fdes.push(entry(&mut section, pointer, body));
+            }
+        }
+        section.extend_from_slice(&0u32.to_ne_bytes());
+
+        assert_eq!(fde_offsets(&section).collect::<Vec<_>>(), fdes);
     }
 }
