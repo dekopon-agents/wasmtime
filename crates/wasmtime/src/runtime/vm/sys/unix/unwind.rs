@@ -63,9 +63,8 @@ fn using_libunwind() -> bool {
 /// The section holds one CIE per batch of FDEs and ends with a 32-bit zero
 /// terminator; CIEs, whose CIE id is zero, are skipped.
 fn fde_offsets(eh_frame: &[u8]) -> impl Iterator<Item = usize> + '_ {
-    let read_u32 = |offset: usize| {
-        u32::from_ne_bytes(eh_frame[offset..offset + 4].try_into().unwrap())
-    };
+    let read_u32 =
+        |offset: usize| u32::from_ne_bytes(eh_frame[offset..offset + 4].try_into().unwrap());
     let end = eh_frame.len() - 4;
     let mut offset = 0;
     core::iter::from_fn(move || {
