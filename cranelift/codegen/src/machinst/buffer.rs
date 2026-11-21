@@ -309,10 +309,8 @@ impl core::fmt::Display for LabelOrOffset {
 /// A buffer of output to be produced, fixed up, and then emitted to a CodeSink
 /// in bulk.
 ///
-/// This struct uses `SmallVec`s to support small-ish function bodies without
-/// any heap allocation. As such, it will be several kilobytes large. This is
-/// likely fine as long as it is stack-allocated for function emission then
-/// thrown away; but beware if many buffer objects are retained persistently.
+/// Emission-only state uses inline storage for small functions.
+/// Data that survives finalization uses vectors to keep retained buffers compact.
 pub struct MachBuffer<I: VCodeInst> {
     // --- machine-code data and metadata:
     //
@@ -387,19 +385,8 @@ pub struct MachBuffer<I: VCodeInst> {
 /// Bulk data that is common between `MachBuffer` and
 /// `MachBufferFinalized`.
 ///
-/// The goal is to indirect the large allocations (`SmallVec`s) so
-/// that we don't move a lot of memory during compilation.
-///
-/// The two named types are essentially a builder/final object pair.
-/// The inner state is the same (except that the builder has further
-/// transient state that is later dropped).
-///
-/// However, many of the fields are either moved over wholesale or
-/// patched then moved over (data). We put these fields in
-/// `MachBufferInner`, hold that shared data in a box so that
-/// finalization can just move a pointer, and then impl `Deref` on the
-/// two `MachBuffer` variants so accesses to these fields are
-/// transparent.
+/// Both types hold this data in a box so finalization can move the pointer.
+/// Use vectors here to avoid reserving inline space in every finalized buffer.
 #[derive(PartialEq, Debug, Clone)]
 #[cfg_attr(
     feature = "enable-serde",
@@ -407,19 +394,19 @@ pub struct MachBuffer<I: VCodeInst> {
 )]
 pub struct MachBufferInner {
     /// The buffer contents, as raw bytes.
-    pub(crate) data: SmallVec<[u8; 1024]>,
+    pub(crate) data: Vec<u8>,
     /// Any trap records referring to this code.
-    pub(crate) traps: SmallVec<[MachTrap; 16]>,
+    pub(crate) traps: Vec<MachTrap>,
     /// Any relocations referring to this code. Note that only *external*
     /// relocations are tracked here; references to labels within the buffer are
     /// resolved before emission.
-    pub(crate) relocs: SmallVec<[MachReloc; 16]>,
+    pub(crate) relocs: Vec<MachReloc>,
     /// Any exception-handler records referred to at call sites.
-    pub(crate) exception_handlers: SmallVec<[MachExceptionHandler; 16]>,
+    pub(crate) exception_handlers: Vec<MachExceptionHandler>,
     /// Any call site records referring to this code.
-    pub(crate) call_sites: SmallVec<[MachCallSite; 16]>,
+    pub(crate) call_sites: Vec<MachCallSite>,
     /// Any patchable call site locations.
-    pub(crate) patchable_call_sites: SmallVec<[MachPatchableCallSite; 16]>,
+    pub(crate) patchable_call_sites: Vec<MachPatchableCallSite>,
     /// Any debug tags referring to this code.
     pub(crate) debug_tags: Vec<MachDebugTags>,
     /// Pool of debug tags referenced by `MachDebugTags` entries.
@@ -428,15 +415,15 @@ pub struct MachBufferInner {
     ///
     /// Each entry is an `(offset, span, stack_map)` triple. Entries are sorted
     /// by code offset, and each stack map covers `span` bytes on the stack.
-    pub(crate) user_stack_maps: SmallVec<[(CodeOffset, u32, ir::UserStackMap); 8]>,
+    pub(crate) user_stack_maps: Vec<(CodeOffset, u32, ir::UserStackMap)>,
     /// Any unwind info at a given location.
-    pub(crate) unwind_info: SmallVec<[(CodeOffset, UnwindInst); 8]>,
+    pub(crate) unwind_info: Vec<(CodeOffset, UnwindInst)>,
     /// Stack frame layout metadata. If provided for a MachBuffer
     /// containing a function body, this allows interpretation of
     /// runtime state given a view of an active stack frame.
     pub(crate) frame_layout: Option<MachBufferFrameLayout>,
     /// Any source location mappings referring to this code.
-    pub(crate) srclocs: SmallVec<[MachSrcLoc; 64]>,
+    pub(crate) srclocs: Vec<MachSrcLoc>,
     /// The required alignment of this buffer.
     pub min_alignment: u32,
 }
@@ -556,18 +543,18 @@ impl<I: VCodeInst> MachBuffer<I> {
     /// `length_limit`.
     pub fn new() -> MachBuffer<I> {
         let inner = Box::new(MachBufferInner {
-            data: SmallVec::new(),
-            traps: SmallVec::new(),
-            relocs: SmallVec::new(),
-            exception_handlers: SmallVec::new(),
-            call_sites: SmallVec::new(),
-            patchable_call_sites: SmallVec::new(),
+            data: Vec::new(),
+            traps: Vec::new(),
+            relocs: Vec::new(),
+            exception_handlers: Vec::new(),
+            call_sites: Vec::new(),
+            patchable_call_sites: Vec::new(),
             debug_tags: vec![],
             debug_tag_pool: vec![],
-            user_stack_maps: SmallVec::new(),
-            unwind_info: SmallVec::new(),
+            user_stack_maps: Vec::new(),
+            unwind_info: Vec::new(),
             frame_layout: None,
-            srclocs: SmallVec::new(),
+            srclocs: Vec::new(),
             min_alignment: I::function_alignment().minimum,
         });
         MachBuffer {
@@ -1939,6 +1926,11 @@ impl MachBufferFinalized {
         &self.srclocs[..]
     }
 
+    /// Release source location storage once the consumer has finished using it.
+    pub fn clear_srclocs(&mut self) {
+        self.srclocs = Vec::new();
+    }
+
     /// Get all debug tags, sorted by associated offset.
     pub fn debug_tags(&self) -> impl Iterator<Item = MachBufferDebugTagList<'_>> {
         self.debug_tags.iter().map(|tags| {
@@ -2012,7 +2004,7 @@ impl MachBufferFinalized {
 
     /// Take this buffer's user stack map metadata.
     pub fn take_user_stack_maps(&mut self) -> SmallVec<[(CodeOffset, u32, ir::UserStackMap); 8]> {
-        mem::take(&mut self.user_stack_maps)
+        SmallVec::from_vec(mem::take(&mut self.user_stack_maps))
     }
 
     /// Get the list of call sites for this code, along with
@@ -2571,7 +2563,7 @@ impl<I: VCodeInst> TextSectionBuilder for MachTextSectionBuilder<I> {
             .finish_emission_maybe_forcing_veneers(self.force_veneers, ctrl_plane);
 
         // We don't need the data any more, so return it to the caller.
-        mem::take(&mut self.buf.data).into_vec()
+        mem::take(&mut self.buf.data)
     }
 }
 
